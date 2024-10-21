@@ -10,6 +10,10 @@ const userSchema = new mongoose.Schema({
     type: [String], // Array of topics (e.g., ['Tech News', 'Business'])
     default: [],
   },
+  keywords: {
+    type: [String], // Array of extracted keywords
+    default: [],
+  },
 });
 
 const User = mongoose.model('User', userSchema);

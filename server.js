@@ -11,6 +11,9 @@ const app = express();
 const PORT = process.env.PORT || 3030;  // Use environment variable for port, default to 3030 if not set
 const SECRET_KEY = process.env.SECRET_KEY; // Use environment variable for secret key
 const https = require('https');
+const nlp = require('compromise');
+const Keyword = require('./models/Keyword');
+const stopWords = require('./utils/stopwords');
 
 
 app.use(bodyParser.json());
@@ -192,6 +195,9 @@ app.get('/api/stock-news', (req, res) => {
   });
 
 
+///////////////
+
+
 // Get user preferences (protected by JWT)
 app.get('/api/preferences', async (req, res) => {
   const authHeader = req.headers.authorization;
@@ -210,72 +216,124 @@ app.get('/api/preferences', async (req, res) => {
       return res.status(404).send('User not found.');
     }
 
-    res.json({ topics: user.preferences });
+    res.status(200).json({ preferences: user.preferences });
   } catch (err) {
     console.error('Error fetching preferences:', err);
     res.status(500).send('Server error.');
   }
 });
+
 // Save user preferences (protected by JWT)
 app.post('/api/preferences', async (req, res) => {
-    const authHeader = req.headers.authorization;
-  
-    if (!authHeader) {
-      return res.status(401).send('Authorization header missing.');
+  const authHeader = req.headers.authorization;
+
+  if (!authHeader) {
+    return res.status(401).send('Authorization header missing.');
+  }
+
+  const token = authHeader.split(' ')[1];
+
+  try {
+    const { email } = jwt.verify(token, process.env.SECRET_KEY);
+    const { topics } = req.body;
+
+    if (!topics || !Array.isArray(topics)) {
+      return res.status(400).send('Invalid topics data.');
     }
-  
-    const token = authHeader.split(' ')[1];
-  
-    try {
-      const { email } = jwt.verify(token, process.env.SECRET_KEY);
-      const { topics } = req.body;
-  
-      if (!topics || !Array.isArray(topics)) {
-        return res.status(400).send('Invalid topics data.');
-      }
-  
-      // Find the user by email
-      const user = await User.findOne({ email });
-  
-      if (!user) {
-        return res.status(404).send('User not found.');
-      }
-  
-      // Update the user's preferences
-      user.preferences = topics;
-      await user.save();
-  
-      // Prepare the preferences list for the email
-      const preferencesList = user.preferences.length
-        ? user.preferences.join(', ')
-        : 'No preferences set';
-  
-      // Define the email content
-      const mailOptions = {
-        from: process.env.EMAIL_USER,
-        to: email,
-        subject: 'Your Updated Preferences',
-        html: `
-          <p>Hello,</p>
-          <p>You have successfully updated your preferences. Here are your current preferences:</p>
-          <ul>
-            ${user.preferences.map((topic) => `<li>${topic}</li>`).join('')}
-          </ul>
-          <p>You can update your preferences anytime by clicking <a href="http://localhost:3000/preferences/${token}">here</a>.</p>
-          <p>Thank you for being a part of our community!</p>
-        `,
-      };
-  
-      // Send the email
-      await transporter.sendMail(mailOptions);
-  
-      // Send response to the client
-      res.send('Preferences saved and email sent.');
-    } catch (err) {
-      console.error('Error saving preferences or sending email:', err);
-      res.status(500).send('Server error.');
+
+    // Find the user by email
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).send('User not found.');
     }
-  });
+
+    // Update and save the user's preferences
+    user.preferences = topics;
+    console.log(`Preferences saved for ${email}:`, topics);
+
+    // Extract keywords from the preferences
+    const preferencesText = topics.join(' ');
+    const extractedKeywords = extractKeywords(preferencesText);
+    console.log(`Extracted Keywords for ${email}:`, extractedKeywords);
+
+    // Save the extracted keywords to the user’s document
+    user.keywords = extractedKeywords;
+    await user.save();
+
+    // Send confirmation email
+    const mailOptions = {
+      from: process.env.EMAIL_USER,
+      to: email,
+      subject: 'Your Updated Preferences',
+      html: `
+        <p>Hello,</p>
+        <p>You have successfully updated your preferences. Here are your current preferences:</p>
+        <ul>
+          ${topics.map((topic) => `<li>${topic}</li>`).join('')}
+        </ul>
+        <p>Here are the extracted keywords:</p>
+        <ul>
+          ${extractedKeywords.map((keyword) => `<li>${keyword}</li>`).join('')}
+        </ul>
+        <p>You can update your preferences anytime by clicking <a href="http://localhost:3000/preferences/${token}">here</a>.</p>
+        <p>Thank you for being a part of our community!</p>
+      `,
+    };
+
+    await transporter.sendMail(mailOptions);
+
+    res.status(200).json({
+      message: 'Preferences and keywords saved successfully.',
+      preferences: topics,
+      keywords: extractedKeywords,
+    });
+  } catch (err) {
+    console.error('Error saving preferences or sending email:', err);
+    res.status(500).send('Server error.');
+  }
+});
+
+// Helper function to extract keywords using NLP
+
+const extractKeywords = (text) => {
+  const doc = nlp(text); // Parse the input text
+  const terms = doc.nouns().out('array').flatMap((term) => term.split(/\s+/));
+
+  const cleanedTerms = terms
+    .map((term) => term.trim().toLowerCase()) // Normalize the terms
+    .filter((term) => term.length > 2 && !stopWords.includes(term)); // Filter stop words
+
+  return Array.from(new Set(cleanedTerms)); // Remove duplicates
+};
+
+
+// Helper function to save individual keywords to the database
+const saveKeywords = async (email, keywords) => {
+  try {
+    // Find the user by email and update the keywords field
+    const user = await User.findOneAndUpdate(
+      { email },
+      { $addToSet: { keywords: { $each: keywords } } }, // Avoid duplicates
+      { new: true } // Return the updated document
+    );
+
+    if (!user) {
+      console.log(`User with email ${email} not found.`);
+      return;
+    }
+
+    console.log(`Keywords saved for ${email}:`, user.keywords);
+  } catch (err) {
+    console.error('Error saving keywords:', err);
+  }
+};
+////////////////
+
+
+
+
+
 // Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
